@@ -1,114 +1,127 @@
 // ==UserScript==
-// @name         自动cppu测评辅助脚本（春季首次课测评）
+// @name         cppu 测评辅助（按题目匹配选项）
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  全自动批量完成测评问卷（识别Element Plus表单并利用LayUI进行外部提交）
+// @version      2.1
+// @description  按题目和选项文本精确匹配，未匹配项保留人工核对
 // @author       ljnljn
 // @match        *://*.cppu.edu.cn/*
 // @grant        none
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  'use strict';
 
-    // 延迟时间（毫秒），可根据网络情况适当调大
-    const LIST_DELAY = 1500;
-    const WAIT_FILL_DELAY = 2500; // 点开弹窗后，等待子页面填完多少毫秒后点击“提交”
+  const WAIT_FILL_DELAY = 2500;
+  const AUTO_SUBMIT = false; // 核对无误后才建议改为 true
 
-    window.addEventListener('load', () => {
-        setTimeout(checkCurrentPage, 1000);
+  /*
+   * 按真实情况配置：
+   * question：题干中稳定存在的一段文字；answer：目标选项中稳定存在的一段文字。
+   * 未配置的题目不会自动选择。
+   */
+  const RULES = [
+    { question: '坚持马克思主义基本观点', answer: '做的非常好' },
+    { question: '课程思政的方法是否得当', answer: '课程思政恰到好处' },
+    { question: '提供了丰富高质的辅助学习资源', answer: '学习资源数量丰富、质量高' },
+    { question: '学习资源利用情况', answer: '利用率高' },
+    { question: '人才培养中的定位以及本门课程的教学目标', answer: '讲得很清楚，我十分理解' },
+    { question: '本课程开设的必要性', answer: '非常必要' },
+    { question: '教学内容科学性、严谨性', answer: '教学内容正确，十分科学严谨' },
+    { question: '教学内容难度', answer: '有一定难度，对我一定挑战，但我能接受' },
+    { question: '体现学科前沿和行业发展动态', answer: '紧跟学科前沿和行业发展动态' },
+    { question: '课程在本专业中的性质、地位和课程教学目标', answer: '讲得很清楚' },
+    { question: '考核形式、成绩构成、分值比例', answer: '讲得很清楚' },
+    { question: '各考核环节的评分标准', answer: '详细说明或已经提供，非常清楚具体' },
+    { question: '警容风纪如何', answer: '老师着装规范，警容严整，举止谈吐文明' },
+    { question: '教学主要采用什么教学方法', answer: '研究型、项目式学习在课程教学中所占比重较大' },
+    { question: '引入除教材之外', answer: '引入的比较多' },
+    { question: '课后给你布置', answer: '基本每次课后都布置' },
+    { question: '完成老师布置的课后学习任务', answer: '每次花费1-2小时' },
+    { question: '查阅除教材以外', answer: '经常需要查阅' },
+    { question: '作业的批改情况', answer: '80%以上的作业都进行了批改' },
+    { question: '作业的讲评情况', answer: '经常进行讲评' },
+    { question: '课后辅导答疑或研讨交流', answer: '经常与学生开展线上或线下辅导答疑' },
+    { question: '老师是否及时进行了解答', answer: '都能够及时解答' },
+    { question: '学业要求是否严格', answer: '学业要求非常严格' },
+    { question: '课堂教学管理是否严格', answer: '管理非常严格，课堂教学秩序非常好' },
+    // 第 25 题请按实际征求意见的次数修改或删除。
+    { question: '面向学生征求过意见建议', answer: '在课程结束后进行过1次，我认为调查的内容针对性比较强' },
+    { question: '通过本门课程学习，你的收获', answer: '收获非常大' }
+  ];
+
+  const normalize = (text) => text
+    .replace(/\s+/g, '')
+    .replace(/[；;，,。！？!?（）()]/g, '')
+    .trim();
+
+  window.addEventListener('load', () => setTimeout(checkCurrentPage, 1000));
+
+  function checkCurrentPage() {
+    if (location.href.includes('cpTaskDetail/tbList')) autoProcessList();
+    else if (location.href.includes('survey/index.html')) fillSurvey();
+  }
+
+  function autoProcessList() {
+    const rows = document.querySelectorAll('#contentTable tbody tr');
+
+    for (const row of rows) {
+      if (!row.innerText.includes('否')) continue;
+      const fillBtn = [...row.querySelectorAll('a')].find((a) => a.innerText.includes('填报'));
+      if (!fillBtn) continue;
+
+      console.log('发现未填报任务，打开问卷。');
+      fillBtn.click();
+
+      if (AUTO_SUBMIT) {
+        setTimeout(() => document.querySelector('.layui-layer-btn0')?.click(), WAIT_FILL_DELAY);
+      }
+      return;
+    }
+
+    console.log('当前列表没有未填报任务。');
+  }
+
+  function fillSurvey() {
+    const questions = document.querySelectorAll('.el-form-item.answer');
+    if (!questions.length) {
+      setTimeout(fillSurvey, 500);
+      return;
+    }
+
+    let selected = 0;
+    const skipped = [];
+
+    questions.forEach((item) => {
+      const titleElement = item.querySelector('.el-form-item__label');
+      const questionText = normalize(titleElement?.innerText || '');
+      const radios = [...item.querySelectorAll('label.el-radio')];
+      if (!radios.length) return; // 文本题不自动填写
+
+      const rule = RULES.find(({ question }) => questionText.includes(normalize(question)));
+      if (!rule) {
+        skipped.push(`${questionText}（未配置规则）`);
+        item.style.outline = '3px solid #e6a23c';
+        return;
+      }
+
+      const matched = radios.filter((radio) => normalize(radio.innerText).includes(normalize(rule.answer)));
+      if (matched.length !== 1) {
+        skipped.push(`${questionText}（选项匹配到 ${matched.length} 项）`);
+        item.style.outline = '3px solid #f56c6c';
+        return;
+      }
+
+      const radio = matched[0];
+      if (!radio.querySelector('input[type="radio"]')?.checked) radio.click();
+      item.style.outline = '3px solid #67c23a';
+      selected++;
+      console.log(`已选择：${titleElement.innerText.trim()} → ${radio.innerText.trim()}`);
     });
 
-    function checkCurrentPage() {
-        const currentUrl = window.location.href;
-
-        // ==========================================
-        // 场景 1：当前在“任务列表”父级页面
-        // ==========================================
-        if (currentUrl.includes('cpTaskDetail/tbList')) {
-            console.log('✅ 检测到处于测评列表页，开始自动化...');
-            autoProcessList();
-        }
-
-        // ==========================================
-        // 场景 2：当前在“问卷填报”子级 iframe 页面
-        // ==========================================
-        else if (currentUrl.includes('survey/index.html')) {
-            console.log('✅ 检测到处于问卷页，开始自动答题...');
-            fillSurvey();
-        }
+    console.log(`完成：自动选择 ${selected} 题；待人工核对 ${skipped.length} 题。`);
+    if (skipped.length) {
+      console.warn('未自动选择的题目：', skipped);
+      alert(`已自动选择 ${selected} 题，仍有 ${skipped.length} 题需核对。\n橙框：未配置；红框：匹配异常。`);
     }
-
-    // 列表页处理逻辑
-    function autoProcessList() {
-        const rows = document.querySelectorAll('#contentTable tbody tr');
-        let foundUnfinished = false;
-
-        for (let row of rows) {
-            // 如果还未答题
-            if (row.innerText.includes('否')) {
-                const fillBtn = row.querySelector('a');
-                if (fillBtn && fillBtn.innerText.includes('填报')) {
-                    console.log('👉 发现未填报任务，正在点击填报...');
-                    fillBtn.click();
-                    foundUnfinished = true;
-
-                    // 点击填报后，会弹出一个 iframe 弹窗。
-                    // 脚本会在那个 iframe 实例里单独运行填表逻辑。
-                    // 因此这里父页面只需要等待几秒钟（确保子页面填完），然后找底部的“提交”按钮按下去就行。
-                    setTimeout(() => {
-                        // 根据您前面提供的 layui 弹窗特征，提交按钮通常是 .layui-layer-btn0
-                        const submitButton = document.querySelector('.layui-layer-btn0');
-                        if (submitButton) {
-                            console.log('👉 正在替您点击提交按钮...');
-                            submitButton.click();
-                            // 提交后页面一般会自动刷新，刷新后代码重新起效，进入下一个未答任务循环。
-                        } else {
-                            console.log('❌ 未找到弹窗的提交按钮！');
-                        }
-                    }, WAIT_FILL_DELAY);
-
-                    break; // 每次只处理1个！不要并发打开一堆弹窗。
-                }
-            }
-        }
-
-        if (!foundUnfinished) {
-            console.log('🎉🎉🎉 太棒了，当前列表所有的测评都已经完成！ 🎉🎉🎉');
-        }
-    }
-
-    // 问卷 iframe 答题逻辑
-    function fillSurvey() {
-        // 第一步：获取所有的题目行组件 (Element Plus 的 el-form-item)
-        const questions = document.querySelectorAll('.el-form-item');
-
-        if(questions.length === 0) {
-            // 如果还没渲染出来，等500ms重试
-            setTimeout(fillSurvey, 500);
-            return;
-        }
-
-        // 第二步：循环所有题目，点击第一个选项（统一好评）
-        questions.forEach((q, index) => {
-            // 取所有的单选按钮对应的 label
-            const radios = q.querySelectorAll('label.el-radio');
-            if(radios && radios.length > 0) {
-                // 默认选第一项
-                radios[0].click();
-                console.log(`已将第 ${index + 1} 题设为：${radios[0].innerText}`);
-            }
-        });
-
-        // 附加功能：防止问卷底部有“主观文字建议”的 textarea 组件，如果有顺便也填了！
-        const textareas = document.querySelectorAll('textarea');
-        textareas.forEach(ta => {
-            ta.value = "老师教学态度极好，内容充实，非常满意！";
-            // 触发 Vue 的双向数据绑定更新（不触发可能会导致为空无法提交）
-            ta.dispatchEvent(new Event('input', { bubbles: true }));
-        });
-
-        console.log('✅ 子页面选项已全部自动填写！');
-    }
-
+  }
 })();
