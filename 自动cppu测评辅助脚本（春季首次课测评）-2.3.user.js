@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cppu 测评辅助（按题目匹配选项）
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  按题目和选项文本精确匹配，全部匹配后自动提交
 // @author       ljnljn
 // @match        *://*.cppu.edu.cn/*
@@ -21,6 +21,14 @@
    * 未配置的题目不会自动选择。
    */
   const RULES = [
+    { question: '老师是否按时到课？', answer: '按时到课' },
+    { question: '你对老师的上课方式是否适应？', answer: '适应' },
+    { question: '老师是否向你讲清楚了本课程的考核方式、成绩构成、分值比例？', answer: '讲得很清楚' },
+    { question: '老师是否在学在警大平台为你开通了本课程学习空间？', answer: '已经开通并进入' },
+    { question: '你认为，学在警大平台上本课程学习资源是否丰富？', answer: '比较丰富' },
+    { question: '老师是否在学在警大平台上传了本课程标准？', answer: '已经上传，我已经看过' },
+    { question: '老师是否在学在警大平台上传了本课程教学总体设计方案？', answer: '已经上传，我已经看过' },
+    { question: '老师是否向你告知了联系方式或课下交流方式？', answer: '已经告知，有问题能联系到老师' },
     { question: '坚持马克思主义基本观点', answer: '做的非常好' },
     { question: '课程思政的方法是否得当', answer: '课程思政恰到好处' },
     { question: '自主训练等提供了丰富高质的辅助学习资源', answer: '学习、训练资源数量丰富、质量高' },
@@ -62,14 +70,72 @@
     { question: '通过本门课程学习，你的收获', answer: '收获非常大' }
   ];
 
-  const normalize = (text) => text
+  // 归一化：去空白，去中英文标点（含顿号、冒号、破折号），保证两侧口径一致
+  const normalize = (text) => (text || '')
     .replace(/\s+/g, '')
-    .replace(/[；;，,。！？!?（）()]/g, '')
+    .replace(/[；;，,。！？!?（）()、：:.·\-—_－—]/g, '')
     .trim();
+
+  /*
+   * 题干匹配：取"最长命中"的那条规则。
+   * 原来按数组顺序 find，一旦短规则排在长规则前面就会抢走题目；
+   * 改成最长优先后，RULES 的顺序不再影响结果。
+   */
+  function findRule(questionText) {
+    let best = null;
+    let bestLength = 0;
+
+    for (const rule of RULES) {
+      const key = normalize(rule.question);
+      if (!key || !questionText.includes(key)) continue;
+      if (key.length > bestLength) {
+        best = rule;
+        bestLength = key.length;
+      }
+    }
+
+    return best;
+  }
+
+  /*
+   * 选项匹配：三级降级，避免 "适应" 命中 "不太适应 / 非常不适应"。
+   *   ① 完全相等 —— 最可靠，直接消歧
+   *   ② 唯一包含 —— 用于 answer 只是选项一部分的长文本
+   *   ③ 最短包含 —— 多个包含时取最短的那项（长的选项通常是把短选项包了进去）
+   */
+  function pickOption(radios, answer) {
+    const target = normalize(answer);
+    if (!target) return [];
+
+    // ① 完全相等
+    const exact = radios.filter((radio) => normalize(radio.innerText) === target);
+    if (exact.length) return exact;
+
+    // ② 包含匹配
+    const hits = radios.filter((radio) => normalize(radio.innerText).includes(target));
+    if (hits.length <= 1) return hits;
+
+    // ③ 剔除"被更短命中项包住"的长选项
+    const minimal = hits.filter((radio) => {
+      const self = normalize(radio.innerText);
+      return !hits.some((other) => {
+        if (other === radio) return false;
+        const text = normalize(other.innerText);
+        return self.includes(text) && self !== text;
+      });
+    });
+
+    return minimal.length ? minimal : hits;
+  }
 
   window.addEventListener('load', () => setTimeout(checkCurrentPage, 1000));
   window.addEventListener('message', (event) => {
-    const sourceHost = new URL(event.origin).hostname;
+    let sourceHost = '';
+    try {
+      sourceHost = new URL(event.origin).hostname;
+    } catch (e) {
+      return;
+    }
     if (!sourceHost.endsWith('.cppu.edu.cn') || event.data?.type !== 'cppu-survey-ready') return;
     if (!AUTO_SUBMIT || !event.data.complete || isSubmitting) return;
 
@@ -114,29 +180,36 @@
 
     questions.forEach((item) => {
       const titleElement = item.querySelector('.el-form-item__label');
-      const questionText = normalize(titleElement?.innerText || '');
+      const rawTitle = titleElement?.innerText?.trim() || '';
+      const questionText = normalize(rawTitle);
       const radios = [...item.querySelectorAll('label.el-radio')];
       if (!radios.length) return; // 文本题不自动填写
 
-      const rule = RULES.find(({ question }) => questionText.includes(normalize(question)));
+      const rule = findRule(questionText);
       if (!rule) {
-        skipped.push(`${questionText}（未配置规则）`);
+        skipped.push(`${rawTitle}（未配置规则）`);
         item.style.outline = '3px solid #e6a23c';
         return;
       }
 
-      const matched = radios.filter((radio) => normalize(radio.innerText).includes(normalize(rule.answer)));
+      const matched = pickOption(radios, rule.answer);
       if (matched.length !== 1) {
-        skipped.push(`${questionText}（选项匹配到 ${matched.length} 项）`);
+        const candidates = matched.map((r) => normalize(r.innerText)).slice(0, 4).join(' / ');
+        skipped.push(`${rawTitle}（选项匹配到 ${matched.length} 项：${candidates || '无'}）`);
         item.style.outline = '3px solid #f56c6c';
         return;
       }
 
       const radio = matched[0];
-      if (!radio.querySelector('input[type="radio"]')?.checked) radio.click();
+      const input = radio.querySelector('input[type="radio"]');
+      if (!input?.checked) {
+        radio.click();
+        if (input && !input.checked) input.click(); // 兜底：某些版本只响应原生 input
+      }
+
       item.style.outline = '3px solid #67c23a';
       selected++;
-      console.log(`已选择：${titleElement.innerText.trim()} → ${radio.innerText.trim()}`);
+      console.log(`已选择：${rawTitle} → ${radio.innerText.trim()}`);
     });
 
     console.log(`完成：自动选择 ${selected} 题；待人工核对 ${skipped.length} 题。`);
